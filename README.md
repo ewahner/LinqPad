@@ -1,4 +1,4 @@
-# LinqPad
+### LinqPad Scripts
 
 LinqPad scripts used for more than querying a database.
 
