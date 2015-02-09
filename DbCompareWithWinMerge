@@ -1,0 +1,195 @@
+void Main()
+{
+	var credSource = new ServerConnection("{server name..this is the source}")
+	{
+		LoginSecure = false,
+		Login = "{dbo privs user}",
+		Password = "{password}"
+	};
+	var sourceServer = new Server(credSource);
+	var credTest = new ServerConnection("{server name..this is the target}")
+	{
+		LoginSecure = false,
+		Login = "{dbo privs user}",
+		Password = "{password}"
+	};
+	var testServer = new Server(credTest);
+	
+	if (!Directory.Exists(@"c:\LinqPadCompare"))
+	{
+		Directory.CreateDirectory(@"c:\LinqPadCompare");
+	}
+	
+	var tabls = CompareTableData(sourceServer, testServer, "Products");
+	tabls.Where (x => x.SchemaMatch == false).Select (x => new { x.SourceServerName, x.TargetServerName, x.Name, x.SchemaMatch, x.link }).Dump("Tables");
+	var procs = CompareProcedures(sourceServer, testServer, "Products");
+	procs.Where (x => x.SchemaMatch == false).Select (x => new { x.SourceServerName, x.TargetServerName, x.Name, x.SchemaMatch, x.link }).Dump("Procs and Functions");
+	
+}
+public List<WinMergeData> CompareProcedures(Server source, Server target, string dbName)
+{
+	var sourceProcs = GetProcedureData(source, dbName);
+	var targetProcs = GetProcedureData(target, dbName);
+	
+	var query = 
+		from s in sourceProcs
+		join tx in targetProcs on s.Name equals tx.Name into tnull
+		from t in tnull.DefaultIfEmpty()
+		select new WinMergeData {
+			SchemaMatch = t == null ? false : Flatten(s.Script) == Flatten(t.Script),
+			SourceServerName = source.Name,
+			TargetServerName = target.Name,
+			Name = s.Name,
+			source = s.Script,
+			target = t == null ? string.Empty : t.Script
+		};
+		
+	return query.ToList();
+}
+
+public List<WinMergeData> CompareTableData(Server source, Server target, string dbName)
+{
+	var sourceTables = GetTableData(source, dbName);
+	var targetTables = GetTableData(target, dbName);
+	
+	var query = 
+		from s in sourceTables
+	    join tx in targetTables on s.Name equals tx.Name into tnull
+		from t in tnull.DefaultIfEmpty()
+		select new WinMergeData {
+			SchemaMatch = t == null ? false : Flatten(s.Script) == Flatten(t.Script),
+			SourceServerName = source.Name,
+			TargetServerName = target.Name,
+			Name = s.Name,
+			source = s.Script,
+			target = t == null ? string.Empty : t.Script
+		};
+
+	return query.ToList();
+}
+
+public int ComputeProgress(int max, int current)
+{
+	return Convert.ToInt32(Math.Round(((decimal)current / (decimal)max) * 100));
+}
+
+public List<SchemaData> GetTableData(Server source, string dbname)
+{
+	var tdata = new List<SchemaData>();
+	var dc = new DumpContainer().Dump(string.Format("Getting Tables for: {0}", source.Name));
+	var prog = new Util.ProgressBar().Dump();
+	foreach(Database db in source.Databases)
+	{
+		if (dbname == db.Name)
+		{
+			TableCollection tables = db.Tables;
+			var curr = 0;
+			foreach(Table t in tables)
+			{
+				dc.Content = string.Format("{0} / {1} {2}", curr, tables.Count, t.Name);
+				prog.Percent = ComputeProgress(tables.Count, ++curr);
+				tdata.Add(new SchemaData{ 
+					Name = t.Name, 
+					Script = FromStringCollection(t.Script())
+				});
+			}	
+		}
+	}
+	return tdata;
+}
+
+public List<SchemaData> GetProcedureData(Server server, string dbName)
+{
+	List<SchemaData> procedures = new List<SchemaData>();
+	var dc = new DumpContainer().Dump(string.Format("Getting Procedures for: {0}", server.Name));
+	foreach (Database db in server.Databases)
+	{
+		if (db.Name.ToLower() == dbName.ToLower())
+		{
+			var prog = new Util.ProgressBar().Dump();
+			var pcnt = 0;
+			foreach (StoredProcedure procedure in db.StoredProcedures)
+			{
+				++pcnt;
+				prog.Percent = ComputeProgress(db.StoredProcedures.Count, pcnt);
+				dc.Content = string.Format("{0} / {1} {2}", pcnt, db.StoredProcedures.Count, procedure.Name);
+				if (!procedure.Name.StartsWith("sp_") && !procedure.Name.StartsWith("dt_") && !procedure.Name.StartsWith("xp_")) 
+				{
+					procedures.Add(new SchemaData() { 
+						Name = procedure.Name, 
+						Script = FromStringCollection(procedure.Script())
+					});
+				}
+			}
+			var fDC = new DumpContainer().Dump(string.Format("Getting Functions for: {0}", server.Name));
+			var fprog = new Util.ProgressBar().Dump();
+			pcnt = 0;
+			foreach (UserDefinedFunction func in db.UserDefinedFunctions)
+			{
+				++pcnt;
+				fprog.Percent = ComputeProgress(db.UserDefinedFunctions.Count, pcnt);
+				fDC.Content = string.Format("{0} / {1} {2}", pcnt, db.UserDefinedFunctions.Count, func.Name);
+				if (!func.Name.StartsWith("dm_") && !func.Name.StartsWith("fn_"))
+				{
+					procedures.Add(new SchemaData() { 
+						Name = func.Name, 
+						Script = FromStringCollection(func.Script())
+					});
+				}
+			}
+		}
+	}
+	return procedures;
+}
+
+private static readonly Regex normalizeSpace = new Regex(@"\s+", RegexOptions.Compiled);
+
+public string Flatten(string proc)
+{
+	if (string.IsNullOrEmpty(proc))
+		return string.Empty;
+	proc = proc.Substring(proc.ToLower().IndexOf("create"));
+	proc = proc.Substring(0, proc.ToLower().LastIndexOf("end") + 3);
+	proc = proc.ToLower().Replace("[", "").Replace("]", "").Replace("\t", "").Trim();
+	var procarr = proc.Split(new char[] {'\n'}, StringSplitOptions.RemoveEmptyEntries);
+	return string.Join("\n", procarr.Select (p => p.Trim()).Where(p => p.Length > 1).Select(d => normalizeSpace.Replace(d, " ")).ToArray());
+}
+
+public string FromStringCollection(StringCollection col)
+{
+	var list = col.Cast<string>().ToList();
+	return (string.Join("", list.ToArray()));
+}
+public class WinMergeData
+{
+	public string SourceServerName { get; set; }
+	public string TargetServerName { get; set; }
+	public string Name { get; set; }
+	public bool SchemaMatch { get; set; }
+	public string source { get; set; }
+	public string target { get; set; }
+	public Hyperlinq link 
+	{ 
+		get { 
+				var left = string.Format(@"c:\LinqPadCompare\{0}_{1}.sql", SourceServerName, Name);
+				var right = string.Format(@"c:\LinqPadCompare\{0}_{1}.sql", TargetServerName, Name);
+				File.WriteAllText(left, source);
+				File.WriteAllText(right, target);
+				return new Hyperlinq(() => Process.Start("WinMerge.exe", string.Format("{0} {1}", left, right)), "WinMerge");
+			}
+	}	
+}
+
+public class MatchData
+{
+	public string Name { get; set; }
+	public bool SchemaMatch { get; set; }
+	public DumpContainer source { get; set; }
+	public DumpContainer target { get; set; }
+}
+
+public class SchemaData
+{
+	public string Name { get; set; }
+	public string Script { get; set; }
+}
