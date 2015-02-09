@@ -2,7 +2,7 @@
 
 LinqPad scripts used for more than querying a database.
 
-DbCompareWithWinMerge
+#####DbCompareWithWinMerge
 - Requires the installation of [WinMerge](http://winmerge.org/)
 
 ######Also Requires the MS-SQL SDK with the following DLLs
